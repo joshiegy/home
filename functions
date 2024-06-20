@@ -8,3 +8,70 @@ remove_last_ssh_host_key() {
   # Run the command to remove the host from known_hosts
   ssh-keygen -f "/home/$USER/.ssh/known_hosts" -R "$ssh_host"
 }
+
+# Function to get the run command for a Docker container
+# first and second argument are required
+get_run_command() {
+    local container_name=${1}
+    local new_container_name=${2}
+    local new_entry_command="${3}"
+    local debug=0
+
+    if [ "${4}" == "debug" ]; then
+        debug=1
+    fi
+
+    # Check if the container exists
+    container_id=$container_name
+
+    # Get the container's configuration
+    container_config=$(docker inspect "$container_id" | jq -r '.[0]')
+
+    # Build the `docker run` command
+    run_command="docker run --name=${new_container_name}"
+
+    # Add detach mode
+    if jq -r '.HostConfig.AttachStdin' <<< "$container_config" | grep -q true; then
+        run_command+=" -i"
+    fi
+    if jq -r '.HostConfig.AttachStdout' <<< "$container_config" | grep -q true || jq -r '.HostConfig.AttachStderr' <<< "$container_config" | grep -q true; then
+        run_command+=" -t"
+    fi
+
+    # if debug, add -ti
+    if [ ${debug} -eq 1 ]; then
+        run_command+=" -ti"
+    fi
+
+    # Add environment variables
+    env_vars=$(jq -r '.Config.Env[]' <<< "$container_config")
+    for env_var in $env_vars; do
+        run_command+=" -e $env_var"
+    done
+
+    # Add port mappings
+    port_mappings=$(jq -r '.HostConfig.PortBindings | to_entries[] | "\(.key):\(.value[0].HostPort)"' <<< "$container_config")
+    for port_mapping in $port_mappings; do
+        container_port=$(echo "$port_mapping" | cut -d':' -f1)
+        host_port=$(echo "$port_mapping" | cut -d':' -f2)
+        run_command+=" -p $host_port:$container_port"
+    done
+
+    # Add volume mappings
+    volume_mappings=$(jq -r '.HostConfig.Binds[]' <<< "$container_config")
+    for volume_mapping in $volume_mappings; do
+        run_command+=" -v $volume_mapping"
+    done
+
+    if [ -n "$new_entry_command" ]; then
+        run_command+=" --entrypoint $new_entry_command"
+    fi
+
+    # Add the image name
+    image_name=$(jq -r '.Config.Image' <<< "$container_config")
+
+    run_command+=" $image_name"
+
+    # Print the `docker run` command
+    echo "$run_command"
+}
